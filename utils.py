@@ -23,7 +23,7 @@ async def call_openai_async(
         temperature: Optional[float] = None
 ) -> Optional[str]:
     """
-    Sending request to OpenAI Chat API and returning the answer.
+    Sends a request to the OpenAI Chat API and returns the answer.
     Includes rate limiting handling and retries.
     """
     if not api_key:
@@ -35,14 +35,13 @@ async def call_openai_async(
 
     for attempt in range(max_retries):
         try:
-            # Format messages according to the new API format
+            # Format messages into the structure expected by your API client.
             formatted_messages = []
             for msg in messages:
                 content = msg.get("content", "")
-                if not content:  # Skip empty messages
+                if not content:
                     continue
-
-                formatted_msg = {
+                formatted_messages.append({
                     "role": msg["role"],
                     "content": [
                         {
@@ -50,40 +49,37 @@ async def call_openai_async(
                             "text": str(content)
                         }
                     ]
-                }
-                formatted_messages.append(formatted_msg)
+                })
 
             if not formatted_messages:
                 raise ValueError("No valid messages to send")
 
-            # Prepare request kwargs
             kwargs = {
                 "model": model,
                 "messages": formatted_messages,
                 "response_format": {"type": "text"}
             }
-
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
             if temperature is not None:
                 kwargs["temperature"] = temperature
 
-            # Make the API call
             response = await client.chat.completions.create(**kwargs)
-
-            # Extract and return the content
+            # Ensure we have a valid response:
+            if not response.choices or len(response.choices) == 0:
+                raise ValueError("No choices returned from OpenAI API")
             message = response.choices[0].message
-            return message.content if message.content else ""
-
+            # Depending on the client, message may be a dict or an object.
+            content = message.get("content", "") if isinstance(message, dict) else message.content
+            return content if content else ""
         except Exception as e:
             if attempt == max_retries - 1:
-                logger.error(f"OpenAI API error after {max_retries} retries: {str(e)}")
+                logger.error(f"OpenAI API error after {max_retries} retries: {e}")
                 return None
-
-            logger.warning(f"OpenAI API error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            logger.warning(f"OpenAI API error (attempt {attempt + 1}/{max_retries}): {e}")
             await asyncio.sleep(base_delay * (2 ** attempt))
-
     return None
+
 
 
 @traceable(name="perform_search")
@@ -166,7 +162,10 @@ async def is_page_useful_async(user_query: str, page_text: str, api_key: str) ->
         {"role": "user", "content": f"User Query: {user_query}\nWebpage Content: {page_text[:20000]}\n\n{prompt}"}
     ]
     response = await call_openai_async(messages=messages, api_key=api_key)
-    return response.strip() if response in ["Yes", "No"] else "No"
+    # Strip, lower-case, and then compare to handle extra whitespace/punctuation
+    res = response.strip().lower() if response else ""
+    return "Yes" if res.startswith("yes") else "No"
+
 
 @traceable(name="extract_relevant_context")
 async def extract_relevant_context_async(user_query: str,
