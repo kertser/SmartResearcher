@@ -3,23 +3,22 @@ import asyncio
 import aiohttp
 from duckduckgo_search import DDGS
 from langsmith import traceable
-from typing import List, Optional, Dict
 import logging
-from tenacity import retry, stop_after_attempt, wait_exponential
+from typing import List, Dict, Optional
 
 # Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-@traceable
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-async def call_openai_async(
-    messages: List[Dict[str, str]],
-    model: str = "gpt-4o-mini",
-    api_key: Optional[str] = None
-) -> Optional[str]:
+@traceable(name="call_openai")
+async def call_openai_async(messages: List[Dict[str, str]],
+                          model: str = "gpt-4o-mini",
+                          api_key: Optional[str] = None) -> Optional[str]:
     """
     Sending request to OpenAI Chat API and returning the answer.
-    Includes retry logic for API calls.
     """
     if not api_key:
         raise ValueError("OpenAI API key is required")
@@ -29,19 +28,17 @@ async def call_openai_async(
             model=model,
             messages=messages,
             api_key=api_key,
-            timeout=30  # 30 seconds timeout
+            timeout=30
         )
         return response['choices'][0]['message']['content']
     except Exception as e:
         logger.error(f"Error calling OpenAI API: {e}")
         return None
 
-@traceable
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+@traceable(name="perform_search")
 async def perform_search_async(query: str) -> List[str]:
     """
     Searching with DuckDuckGo and returning list of URLs.
-    Includes retry logic for failed searches.
     """
     try:
         results = list(DDGS().text(query, max_results=10))
@@ -52,13 +49,13 @@ async def perform_search_async(query: str) -> List[str]:
         logger.error(f"Error during search with DuckDuckGo: {e}")
         return []
 
-@traceable
+@traceable(name="fetch_webpage")
 async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> str:
     """
-    Asynchronously loads webpages with proper error handling and timeout
+    Asynchronously loads webpages with proper error handling
     """
     try:
-        async with session.get(url, timeout=20) as resp:  # 20 seconds timeout
+        async with session.get(url, timeout=20) as resp:
             if resp.status == 200:
                 return await resp.text()
             else:
@@ -71,12 +68,8 @@ async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> 
         logger.error(f"Error reading webpage from {url}: {e}")
         return ""
 
-@traceable
-async def is_page_useful_async(
-    user_query: str,
-    page_text: str,
-    api_key: str
-) -> str:
+@traceable(name="evaluate_page_usefulness")
+async def is_page_useful_async(user_query: str, page_text: str, api_key: str) -> str:
     """
     Checks whether the webpage is useful with OpenAI.
     Returns "Yes" or "No".
@@ -93,13 +86,11 @@ async def is_page_useful_async(
     response = await call_openai_async(messages, api_key=api_key)
     return response.strip() if response in ["Yes", "No"] else "No"
 
-@traceable
-async def extract_relevant_context_async(
-    user_query: str,
-    search_query: str,
-    page_text: str,
-    api_key: str
-) -> str:
+@traceable(name="extract_relevant_context")
+async def extract_relevant_context_async(user_query: str,
+                                       search_query: str,
+                                       page_text: str,
+                                       api_key: str) -> str:
     """
     Extracts relevant information from the webpage text
     """

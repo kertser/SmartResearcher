@@ -1,11 +1,11 @@
 import aiohttp
 import os
 import asyncio
-import logging
 from langgraph.graph import StateGraph
+from langsmith import traceable
 from utils import perform_search_async, fetch_webpage_text_async, is_page_useful_async, extract_relevant_context_async
 from dotenv import load_dotenv
-from typing import List, Optional, Dict, Any
+import logging
 
 # Configure logging
 logging.basicConfig(
@@ -16,77 +16,79 @@ logger = logging.getLogger(__name__)
 
 
 class State:
-    def __init__(self, user_query: str, api_key: Optional[str] = None):
-        self.user_query: str = user_query
-        self.search_results: List[str] = []
-        self.relevant_texts: List[str] = []
-        self.api_key: Optional[str] = api_key
+    def __init__(self, user_query: str, api_key: str | None = None):
+        self.user_query = user_query
+        self.search_results = []
+        self.relevant_texts = []
+        self.api_key = api_key
 
 
-async def search_step(state: State) -> State:
+@traceable(name="search_step")
+async def search_step(state: State) -> dict:
     """Searches following the user request"""
     state.search_results = await perform_search_async(state.user_query)
     logger.info(f"Found {len(state.search_results)} search results")
-    return state
+    return {"state": state}
 
 
-async def process_single_url(session: aiohttp.ClientSession, url: str, query: str, api_key: str) -> Optional[str]:
+async def process_single_url(session: aiohttp.ClientSession, url: str, query: str, api_key: str) -> str | None:
     """Process a single URL with proper error handling"""
     try:
         page_text = await fetch_webpage_text_async(session, url)
-        if not page_text:
-            return None
-
-        is_useful = await is_page_useful_async(query, page_text, api_key)
-        if is_useful == "Yes":
+        if page_text and await is_page_useful_async(query, page_text, api_key) == "Yes":
             return await extract_relevant_context_async(query, query, page_text, api_key)
     except Exception as e:
         logger.error(f"Error processing URL {url}: {e}")
     return None
 
-
-async def process_results_step(state: State) -> State:
+@traceable(name="process_results_step")
+async def process_results_step(state: State) -> dict:
     """Filtering links of the provided urls"""
-    timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds timeout
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Process URLs concurrently with proper timeout handling
-        tasks = [
-            process_single_url(session, url, state.user_query, state.api_key)
-            for url in state.search_results
-        ]
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        # Process URLs concurrently
+        tasks = []
+        for url in state.search_results:
+            if state.api_key:  # Ensure we have an API key
+                tasks.append(process_single_url(session, url, state.user_query, state.api_key))
 
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             # Filter out errors and None results
-            valid_results = [
-                text for text in results
-                if text and isinstance(text, str)
-            ]
-            state.relevant_texts.extend(valid_results)
-            logger.info(f"Processed {len(valid_results)} relevant results")
-        except asyncio.TimeoutError:
-            logger.error("Processing timeout occurred")
+            state.relevant_texts.extend([text for text in results if isinstance(text, str) and text])
+            logger.info(f"Processed {len(state.relevant_texts)} relevant results")
         except Exception as e:
-            logger.error(f"Error during processing: {e}")
+            logger.error(f"Error in processing results: {e}")
 
-    return state
+    return {"state": state}
 
 
-def load_keys(keys: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Initialize environment and load API keys"""
-    if keys is None:
-        keys = {}
+def initialize_workflow() -> StateGraph:
+    """Initialize and configure the workflow"""
+    workflow = StateGraph(State)
 
-    # Load environment variables
+    # Add nodes
+    workflow.add_node("search", search_step)
+    workflow.add_node("process_results", process_results_step)
+
+    # Set entry point
+    workflow.set_entry_point("search")
+
+    # Add edge
+    workflow.add_edge("search", "process_results")
+
+    # Set end node
+    workflow.set_finish_point("process_results")
+
+    return workflow
+
+
+def load_keys() -> dict:
+    """Initialize environment and API keys"""
     load_dotenv()
-
-    # Get OpenAI API key
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OpenAI API key not found in environment variables")
-
-    keys['openai_api_key'] = api_key
-    return keys
+    return {"openai_api_key": api_key}
 
 
 async def async_main() -> None:
@@ -94,22 +96,15 @@ async def async_main() -> None:
         # Load API keys
         keys = load_keys()
 
-        # Initialize workflow
-        workflow = StateGraph(State)
-        workflow.add_node("search", search_step)
-        workflow.add_node("process_results", process_results_step)
-        workflow.set_entry_point("search")
-        workflow.add_edge("search", "process_results")
-        workflow.finalize()
-
         # Get user input
         user_query = input("Enter research query: ").strip()
         if not user_query:
             raise ValueError("Query cannot be empty")
 
-        # Run workflow
-        app = workflow.compile()
-        result = await app.invoke(State(user_query, api_key=keys['openai_api_key']))
+        # Initialize and run workflow
+        workflow = initialize_workflow()
+        app = workflow.compile()  # compile() is used instead of finalize()
+        result = await app.invoke(State(user_query, api_key=keys["openai_api_key"]))
 
         # Display results
         print("\n=== Final Report ===\n")
