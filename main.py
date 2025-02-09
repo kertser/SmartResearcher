@@ -6,6 +6,7 @@ from langsmith import traceable
 from utils import perform_search_async, fetch_webpage_text_async, is_page_useful_async, extract_relevant_context_async
 from dotenv import load_dotenv
 import logging
+from typing import TypedDict, List, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -15,60 +16,76 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class State:
-    def __init__(self, user_query: str, api_key: str | None = None):
-        self.user_query = user_query
-        self.search_results = []
-        self.relevant_texts = []
-        self.api_key = api_key
+# Define the state structure as a TypedDict
+class ResearchState(TypedDict):
+    user_query: str
+    search_results: List[str]
+    relevant_texts: List[str]
+    api_key: Optional[str]
 
 
 @traceable(name="search_step")
-async def search_step(state: State) -> dict:
+async def search_step(state: dict) -> dict:
     """Searches following the user request"""
-    state.search_results = await perform_search_async(state.user_query)
-    logger.info(f"Found {len(state.search_results)} search results")
-    return {"state": state}
+    search_results = await perform_search_async(state["user_query"])
+    logger.info(f"Found {len(search_results)} search results")
+    # Return only the updates to the state
+    return {"search_results": search_results}
 
 
 async def process_single_url(session: aiohttp.ClientSession, url: str, query: str, api_key: str) -> str | None:
     """Process a single URL with proper error handling"""
     try:
         page_text = await fetch_webpage_text_async(session, url)
-        if page_text and await is_page_useful_async(query, page_text, api_key) == "Yes":
-            return await extract_relevant_context_async(query, query, page_text, api_key)
+        if page_text:
+            is_useful = await is_page_useful_async(query, page_text, api_key)
+            if is_useful == "Yes":
+                return await extract_relevant_context_async(query, query, page_text, api_key)
     except Exception as e:
         logger.error(f"Error processing URL {url}: {e}")
     return None
 
+
 @traceable(name="process_results_step")
-async def process_results_step(state: State) -> dict:
+async def process_results_step(state: dict) -> dict:
     """Filtering links of the provided urls"""
+    relevant_texts = []
+
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         # Process URLs concurrently
         tasks = []
-        for url in state.search_results:
-            if state.api_key:  # Ensure we have an API key
-                tasks.append(process_single_url(session, url, state.user_query, state.api_key))
+        for url in state["search_results"]:
+            if state["api_key"]:  # Ensure we have an API key
+                tasks.append(process_single_url(session, url, state["user_query"], state["api_key"]))
 
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             # Filter out errors and None results
-            state.relevant_texts.extend([text for text in results if isinstance(text, str) and text])
-            logger.info(f"Processed {len(state.relevant_texts)} relevant results")
+            relevant_texts.extend([text for text in results if isinstance(text, str) and text])
+            logger.info(f"Processed {len(relevant_texts)} relevant results")
         except Exception as e:
             logger.error(f"Error in processing results: {e}")
 
-    return {"state": state}
+    # Return only the updates to the state
+    return {"relevant_texts": relevant_texts}
 
 
 def initialize_workflow() -> StateGraph:
     """Initialize and configure the workflow"""
-    workflow = StateGraph(State)
+    # Initialize with TypedDict instead of class
+    workflow = StateGraph(ResearchState)
 
-    # Add nodes
-    workflow.add_node("search", search_step)
-    workflow.add_node("process_results", process_results_step)
+    # Add nodes - using the correct method signature
+    workflow.add_node(
+        "search",
+        action=search_step,
+        metadata={"description": "Performs search based on user query"}
+    )
+    workflow.add_node(
+        "process_results",
+        action=process_results_step,
+        metadata={"description": "Processes and filters search results"}
+    )
 
     # Set entry point
     workflow.set_entry_point("search")
@@ -101,15 +118,23 @@ async def async_main() -> None:
         if not user_query:
             raise ValueError("Query cannot be empty")
 
+        # Initialize the state as a dictionary
+        initial_state = {
+            "user_query": user_query,
+            "search_results": [],
+            "relevant_texts": [],
+            "api_key": keys["openai_api_key"]
+        }
+
         # Initialize and run workflow
         workflow = initialize_workflow()
-        app = workflow.compile()  # compile() is used instead of finalize()
-        result = await app.invoke(State(user_query, api_key=keys["openai_api_key"]))
+        app = workflow.compile()
+        result = await app.ainvoke(initial_state)
 
         # Display results
         print("\n=== Final Report ===\n")
-        if result.relevant_texts:
-            print("\n".join(result.relevant_texts))
+        if result["relevant_texts"]:
+            print("\n".join(result["relevant_texts"]))
         else:
             print("No relevant information found.")
 
