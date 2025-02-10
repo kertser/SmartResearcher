@@ -1,10 +1,11 @@
-from openai import OpenAI
+from openai import AsyncOpenAI
 import asyncio
 import aiohttp
 from web_search_agent import WebSearchAgent
 from langsmith import traceable
 import logging
 from typing import List, Dict, Optional
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 @traceable(name="call_openai")
 async def call_openai_async(
         messages: List[Dict[str, str]],
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4",  # Updated default model
         api_key: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None
@@ -29,27 +30,21 @@ async def call_openai_async(
     if not api_key:
         raise ValueError("OpenAI API key is required")
 
-    client = OpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key)  # Use AsyncOpenAI
     max_retries = 5
     base_delay = 1
 
     for attempt in range(max_retries):
         try:
-            # Format messages into the structure expected by your API client.
-            formatted_messages = []
-            for msg in messages:
-                content = msg.get("content", "")
-                if not content:
-                    continue
-                formatted_messages.append({
+            # Simplified message formatting
+            formatted_messages = [
+                {
                     "role": msg["role"],
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": str(content)
-                        }
-                    ]
-                })
+                    "content": str(msg["content"])
+                }
+                for msg in messages
+                if msg.get("content")
+            ]
 
             if not formatted_messages:
                 raise ValueError("No valid messages to send")
@@ -57,7 +52,6 @@ async def call_openai_async(
             kwargs = {
                 "model": model,
                 "messages": formatted_messages,
-                "response_format": {"type": "text"}
             }
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens
@@ -65,13 +59,8 @@ async def call_openai_async(
                 kwargs["temperature"] = temperature
 
             response = await client.chat.completions.create(**kwargs)
-            # Ensure we have a valid response:
-            if not response.choices or len(response.choices) == 0:
-                raise ValueError("No choices returned from OpenAI API")
-            message = response.choices[0].message
-            # Depending on the client, message may be a dict or an object.
-            content = message.get("content", "") if isinstance(message, dict) else message.content
-            return content if content else ""
+            return response.choices[0].message.content if response.choices else ""
+
         except Exception as e:
             if attempt == max_retries - 1:
                 logger.error(f"OpenAI API error after {max_retries} retries: {e}")
@@ -81,61 +70,70 @@ async def call_openai_async(
     return None
 
 
+def is_valid_url(url: str) -> bool:
+    """Check if a URL is valid and has a proper scheme."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme in ('http', 'https'), result.netloc])
+    except Exception:
+        return False
+
 
 @traceable(name="perform_search")
 async def perform_search_async(query: str) -> List[str]:
     """
-    Searching with DuckDuckGo and returning list of URLs.
-    Uses AsyncDDGS for better performance and rate limit handling.
-
-    Args:
-        query: Search query string
-
-    Returns:
-        List of URLs from search results
+    Searching with Web Search Agent and returning list of valid URLs.
     """
     try:
-        # Create search agent instance
         agent = WebSearchAgent(max_results=5)
-
-        # Get search response asynchronously
         result = await agent.get_response(query=query)
 
         if result['status'] == 'success':
-            # Extract URLs from the response
-            summary_parts = result['response'].split('\n\n')
             urls = []
+            summary_parts = result['response'].split('\n\n')
 
             for part in summary_parts:
                 if 'Source:' in part:
                     url = part.split('Source:')[-1].strip()
-                    if url:
+                    if url and is_valid_url(url):
                         urls.append(url)
 
-            logger.info(f"Found {len(urls)} search results")
-
-            if urls:
-                logger.info(f"Search successful with {len(urls)} results")
-
+            logger.info(f"Found {len(urls)} valid search results")
             return urls
 
-        else:
-            logger.error(f"Search failed: {result.get('error', 'Unknown error')}")
-            return []
+        logger.error(f"Search failed: {result.get('error', 'Unknown error')}")
+        return []
 
     except Exception as e:
-        logger.error(f"Error during search with DuckDuckGo: {str(e)}")
+        logger.error(f"Error during search: {str(e)}")
         return []
+
 
 @traceable(name="fetch_webpage")
 async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> str:
     """
-    Asynchronously loads webpages with proper error handling
+    Asynchronously loads webpages with proper error handling and encoding detection.
     """
+    if not is_valid_url(url):
+        logger.warning(f"Invalid URL skipped: {url}")
+        return ""
+
     try:
         async with session.get(url, timeout=20) as resp:
             if resp.status == 200:
-                return await resp.text()
+                # Try different encodings
+                try:
+                    content = await resp.read()
+                    # Try UTF-8 first
+                    text = content.decode('utf-8')
+                except UnicodeDecodeError:
+                    try:
+                        # Try Latin-1 as fallback
+                        text = content.decode('latin-1')
+                    except UnicodeDecodeError:
+                        # Try with errors ignored as last resort
+                        text = content.decode('utf-8', errors='ignore')
+                return text
             else:
                 logger.warning(f"Error loading {url}: {resp.status}")
                 return ""
@@ -146,12 +144,16 @@ async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> 
         logger.error(f"Error reading webpage from {url}: {e}")
         return ""
 
+
 @traceable(name="evaluate_page_usefulness")
 async def is_page_useful_async(user_query: str, page_text: str, api_key: str) -> str:
     """
     Checks whether the webpage is useful with OpenAI.
     Returns "Yes" or "No".
     """
+    if not page_text.strip():
+        return "No"
+
     prompt = (
         "You are a critical research evaluator. Given the user's query and the content of a webpage, "
         "determine if the webpage contains information relevant and useful for addressing the query. "
@@ -162,9 +164,7 @@ async def is_page_useful_async(user_query: str, page_text: str, api_key: str) ->
         {"role": "user", "content": f"User Query: {user_query}\nWebpage Content: {page_text[:20000]}\n\n{prompt}"}
     ]
     response = await call_openai_async(messages=messages, api_key=api_key)
-    # Strip, lower-case, and then compare to handle extra whitespace/punctuation
-    res = response.strip().lower() if response else ""
-    return "Yes" if res.startswith("yes") else "No"
+    return "Yes" if response and response.strip().lower().startswith("yes") else "No"
 
 
 @traceable(name="extract_relevant_context")
@@ -175,6 +175,9 @@ async def extract_relevant_context_async(user_query: str,
     """
     Extracts relevant information from the webpage text
     """
+    if not page_text.strip():
+        return ""
+
     prompt = (
         "You are an expert in extracting relevant information. Given the user's query, the search query that led to "
         "this page, and the webpage content, extract all relevant information. Return only the relevant text."
