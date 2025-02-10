@@ -25,7 +25,7 @@ class ResearchState(TypedDict):
 
 
 @traceable(name="search_step")
-async def search_step(state: dict) -> dict:
+async def search_step(state: dict, **kwargs) -> dict:
     """Searches following the user request"""
     search_results = await perform_search_async(state["user_query"])
     logger.info(f"Found {len(search_results)} search results")
@@ -47,7 +47,7 @@ async def process_single_url(session: aiohttp.ClientSession, url: str, query: st
 
 
 @traceable(name="process_results_step")
-async def process_results_step(state: dict) -> dict:
+async def process_results_step(state: dict, **kwargs) -> dict:
     """Filtering links of the provided urls"""
     relevant_texts = []
 

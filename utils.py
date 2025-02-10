@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 @traceable(name="call_openai")
 async def call_openai_async(
         messages: List[Dict[str, str]],
-        model: str = "gpt-4o",
+        model: str = "gpt-4o-mini",
         api_key: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None
@@ -113,6 +113,10 @@ async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> 
     Asynchronously loads webpages with proper error handling
     """
     try:
+        if url.lower().endswith(".pdf"):
+            logger.warning(f"Skipping PDF file: {url}")
+            return ""
+
         async with session.get(url, timeout=20) as resp:
             if resp.status == 200:
                 return await resp.text()
