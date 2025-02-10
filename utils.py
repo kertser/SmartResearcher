@@ -1,11 +1,10 @@
-from openai import AsyncOpenAI
+from langchain_openai import ChatOpenAI
 import asyncio
 import aiohttp
 from web_search_agent import WebSearchAgent
 from langsmith import traceable
 import logging
 from typing import List, Dict, Optional
-from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 @traceable(name="call_openai")
 async def call_openai_async(
         messages: List[Dict[str, str]],
-        model: str = "gpt-4",  # Updated default model
+        model: str = "gpt-4o",
         api_key: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None
@@ -30,36 +29,28 @@ async def call_openai_async(
     if not api_key:
         raise ValueError("OpenAI API key is required")
 
-    client = AsyncOpenAI(api_key=api_key)  # Use AsyncOpenAI
+    llm = ChatOpenAI(model=model, max_tokens=max_tokens, temperature=temperature)
     max_retries = 5
     base_delay = 1
 
     for attempt in range(max_retries):
         try:
-            # Simplified message formatting
-            formatted_messages = [
-                {
+            # Format messages into the structure expected by your API client.
+            formatted_messages = []
+            for msg in messages:
+                content = msg.get("content", "")
+                if not content:
+                    continue
+                formatted_messages.append({
                     "role": msg["role"],
-                    "content": str(msg["content"])
-                }
-                for msg in messages
-                if msg.get("content")
-            ]
+                    "content": content
+                })
 
             if not formatted_messages:
                 raise ValueError("No valid messages to send")
 
-            kwargs = {
-                "model": model,
-                "messages": formatted_messages,
-            }
-            if max_tokens is not None:
-                kwargs["max_tokens"] = max_tokens
-            if temperature is not None:
-                kwargs["temperature"] = temperature
-
-            response = await client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content if response.choices else ""
+            response = llm.invoke(formatted_messages)
+            return response.content
 
         except Exception as e:
             if attempt == max_retries - 1:
@@ -70,70 +61,61 @@ async def call_openai_async(
     return None
 
 
-def is_valid_url(url: str) -> bool:
-    """Check if a URL is valid and has a proper scheme."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme in ('http', 'https'), result.netloc])
-    except Exception:
-        return False
-
-
 @traceable(name="perform_search")
 async def perform_search_async(query: str) -> List[str]:
     """
-    Searching with Web Search Agent and returning list of valid URLs.
+    Searching with DuckDuckGo and returning list of URLs.
+    Uses AsyncDDGS for better performance and rate limit handling.
+
+    Args:
+        query: Search query string
+
+    Returns:
+        List of URLs from search results
     """
     try:
+        # Create search agent instance
         agent = WebSearchAgent(max_results=5)
+
+        # Get search response asynchronously
         result = await agent.get_response(query=query)
 
         if result['status'] == 'success':
-            urls = []
+            # Extract URLs from the response
             summary_parts = result['response'].split('\n\n')
+            urls = []
 
             for part in summary_parts:
                 if 'Source:' in part:
                     url = part.split('Source:')[-1].strip()
-                    if url and is_valid_url(url):
+                    if url:
                         urls.append(url)
 
-            logger.info(f"Found {len(urls)} valid search results")
+            logger.info(f"Found {len(urls)} search results")
+
+            if urls:
+                logger.info(f"Search successful with {len(urls)} results")
+
             return urls
 
-        logger.error(f"Search failed: {result.get('error', 'Unknown error')}")
-        return []
+        else:
+            logger.error(f"Search failed: {result.get('error', 'Unknown error')}")
+            return []
 
     except Exception as e:
-        logger.error(f"Error during search: {str(e)}")
+        logger.error(f"Error during search with DuckDuckGo: {str(e)}")
         return []
 
 
 @traceable(name="fetch_webpage")
 async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> str:
     """
-    Asynchronously loads webpages with proper error handling and encoding detection.
+    Asynchronously loads webpages with proper error handling
     """
-    if not is_valid_url(url):
-        logger.warning(f"Invalid URL skipped: {url}")
-        return ""
-
     try:
         async with session.get(url, timeout=20) as resp:
             if resp.status == 200:
-                # Try different encodings
-                try:
-                    content = await resp.read()
-                    # Try UTF-8 first
-                    text = content.decode('utf-8')
-                except UnicodeDecodeError:
-                    try:
-                        # Try Latin-1 as fallback
-                        text = content.decode('latin-1')
-                    except UnicodeDecodeError:
-                        # Try with errors ignored as last resort
-                        text = content.decode('utf-8', errors='ignore')
-                return text
+                return await resp.text()
             else:
                 logger.warning(f"Error loading {url}: {resp.status}")
                 return ""
@@ -151,9 +133,6 @@ async def is_page_useful_async(user_query: str, page_text: str, api_key: str) ->
     Checks whether the webpage is useful with OpenAI.
     Returns "Yes" or "No".
     """
-    if not page_text.strip():
-        return "No"
-
     prompt = (
         "You are a critical research evaluator. Given the user's query and the content of a webpage, "
         "determine if the webpage contains information relevant and useful for addressing the query. "
@@ -161,23 +140,22 @@ async def is_page_useful_async(user_query: str, page_text: str, api_key: str) ->
     )
     messages = [
         {"role": "system", "content": "You are a strict evaluator of research relevance."},
-        {"role": "user", "content": f"User Query: {user_query}\nWebpage Content: {page_text[:20000]}\n\n{prompt}"}
+        {"role": "user", "content": f"User Query: {user_query}\nWebpage Content: {page_text[:10000]}\n\n{prompt}"}
     ]
     response = await call_openai_async(messages=messages, api_key=api_key)
-    return "Yes" if response and response.strip().lower().startswith("yes") else "No"
+    # Strip, lower-case, and then compare to handle extra whitespace/punctuation
+    res = response.strip().lower() if response else ""
+    return "Yes" if res.startswith("yes") else "No"
 
 
 @traceable(name="extract_relevant_context")
 async def extract_relevant_context_async(user_query: str,
-                                       search_query: str,
-                                       page_text: str,
-                                       api_key: str) -> str:
+                                         search_query: str,
+                                         page_text: str,
+                                         api_key: str) -> str:
     """
     Extracts relevant information from the webpage text
     """
-    if not page_text.strip():
-        return ""
-
     prompt = (
         "You are an expert in extracting relevant information. Given the user's query, the search query that led to "
         "this page, and the webpage content, extract all relevant information. Return only the relevant text."
@@ -189,7 +167,7 @@ async def extract_relevant_context_async(user_query: str,
             "content": (
                 f"User Query: {user_query}\n"
                 f"Search Query: {search_query}\n"
-                f"Webpage Content: {page_text[:20000]}\n\n{prompt}"
+                f"Webpage Content: {page_text[:10000]}\n\n{prompt}"
             )
         }
     ]
