@@ -10,11 +10,6 @@ from dotenv import load_dotenv
 import logging
 import shutil
 
-from dialectic_generator import DialecticGenerator
-from iterative_researcher import IterativeResearcher
-from synthesis_generator import SynthesisGenerator
-from scientific_formatter import ScientificFormatter
-from research_workflow import ResearchPhase
 from research_workflow import ResearchState
 
 # Configure logging
@@ -23,34 +18,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-
-class DialecticalResearcher:
-    def __init__(self, api_key):
-        self.generator = DialecticGenerator(api_key)
-        self.researcher = IterativeResearcher()
-        self.synthesizer = SynthesisGenerator(api_key)
-        self.formatter = ScientificFormatter()
-
-    async def research_topic(self, topic: str) -> str:
-        # Generate thesis and antithesis
-        thesis_statement, antithesis_statement = await self.generator.generate_dialectic_points(topic)
-
-        # Research both points
-        thesis_result = await self.researcher.research_point(
-            thesis_statement, ResearchPhase.THESIS)
-        antithesis_result = await self.researcher.research_point(
-            antithesis_statement, ResearchPhase.ANTITHESIS)
-
-        # Generate synthesis
-        synthesis = await self.synthesizer.generate_synthesis(
-            thesis_result, antithesis_result)
-
-        # Format final output
-        final_paper = self.formatter.format_research_output(
-            topic, thesis_result, antithesis_result, synthesis)
-
-        return final_paper
 
 
 def check_graphviz_installed() -> bool:
