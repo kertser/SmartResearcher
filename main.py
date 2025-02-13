@@ -37,9 +37,9 @@ async def create_visualization(client: Client, project_name: str) -> None:
     if not check_graphviz_installed():
         logger.warning("Graphviz is not installed or not in PATH. Skipping visualization.")
         logger.info("To install Graphviz:\n"
-                   "1. Download from https://graphviz.gitlab.io/download/\n"
-                   "2. Add the bin directory to your system's PATH\n"
-                   "3. Restart your terminal/IDE")
+                    "1. Download from https://graphviz.gitlab.io/download/\n"
+                    "2. Add the bin directory to your system's PATH\n"
+                    "3. Restart your terminal/IDE")
         return
 
     try:

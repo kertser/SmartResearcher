@@ -896,6 +896,14 @@ wheels = [
 ]
 
 [[package]]
+name = "pygraphviz-bin"
+version = "0.0.1.2251946352"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/a5/e5afbe9379c912928276c471e4411bcd2ac62f17a72acc9b9968f4f04c3a/pygraphviz_bin-0.0.1.2251946352-py3-none-any.whl", hash = "sha256:75b842e7730c7cc501a2d10b799267687412b6e0762ae71d32de3f2c02d9d431", size = 597244 },
+]
+
+[[package]]
 name = "python-dotenv"
 version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1010,6 +1018,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langsmith" },
     { name = "openai" },
+    { name = "pygraphviz-bin" },
     { name = "python-dotenv" },
 ]
 
@@ -1025,6 +1034,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=0.2.70" },
     { name = "langsmith", specifier = ">=0.3.7" },
     { name = "openai", specifier = ">=1.61.1" },
+    { name = "pygraphviz-bin", specifier = ">=0.0.1.2251946352" },
     { name = "python-dotenv", specifier = "==1.0.1" },
 ]
 

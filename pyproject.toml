@@ -14,5 +14,6 @@ dependencies = [
     "langgraph>=0.2.70",
     "langsmith>=0.3.7",
     "openai>=1.61.1",
+    "pygraphviz-bin>=0.0.1.2251946352",
     "python-dotenv==1.0.1",
 ]
