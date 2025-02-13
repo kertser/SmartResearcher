@@ -9,6 +9,7 @@ from utils import perform_search_async, fetch_webpage_text_async, is_page_useful
 from dotenv import load_dotenv
 import logging
 from typing import TypedDict, List, Optional
+import shutil
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +25,53 @@ class ResearchState(TypedDict):
     search_results: List[str]
     relevant_texts: List[str]
     api_key: Optional[str]
+
+
+def check_graphviz_installed() -> bool:
+    """Check if Graphviz is installed and accessible"""
+    return shutil.which('dot') is not None
+
+
+async def create_visualization(client: Client, project_name: str) -> None:
+    """Create visualization if Graphviz is available"""
+    if not check_graphviz_installed():
+        logger.warning("Graphviz is not installed or not in PATH. Skipping visualization.")
+        logger.info("To install Graphviz:\n"
+                   "1. Download from https://graphviz.gitlab.io/download/\n"
+                   "2. Add the bin directory to your system's PATH\n"
+                   "3. Restart your terminal/IDE")
+        return
+
+    try:
+        # Retrieve runs associated with the specified project
+        runs = list(client.list_runs(project_name=project_name, is_root=True))
+
+        if not runs:
+            logger.warning(
+                f"No runs found for project '{project_name}'. Ensure that the project name is correct and that runs have been logged.")
+            return
+
+        latest_run = runs[0]  # Get the latest run
+        child_runs = list(client.list_runs(parent_run=latest_run.id))
+
+        # Create a graph
+        dot = Digraph()
+        dot.attr(rankdir='TB')  # Top to bottom direction
+
+        # Add the root node
+        dot.node(str(latest_run.id), latest_run.name)
+
+        # Add child nodes and edges
+        for child_run in child_runs:
+            dot.node(str(child_run.id), child_run.name)
+            dot.edge(str(latest_run.id), str(child_run.id))
+
+        # Render flowchart
+        dot.render("flowchart", format="png", view=True)
+        logger.info("Visualization created successfully")
+
+    except Exception as e:
+        logger.error(f"Error creating visualization: {e}")
 
 
 @traceable(name="search_step")
@@ -74,10 +122,8 @@ async def process_results_step(state: dict, **kwargs) -> dict:
 
 def initialize_workflow() -> StateGraph:
     """Initialize and configure the workflow"""
-    # Initialize with TypedDict instead of class
     workflow = StateGraph(ResearchState)
 
-    # Add nodes - using the correct method signature
     workflow.add_node(
         "search",
         action=search_step,
@@ -89,13 +135,8 @@ def initialize_workflow() -> StateGraph:
         metadata={"description": "Processes and filters search results"}
     )
 
-    # Set entry point
     workflow.set_entry_point("search")
-
-    # Add edge
     workflow.add_edge("search", "process_results")
-
-    # Set end node
     workflow.set_finish_point("process_results")
 
     return workflow
@@ -121,7 +162,7 @@ async def async_main() -> None:
         if not user_query:
             raise ValueError("Query cannot be empty")
 
-        # Initialize the state as a dictionary
+        # Initialize the state
         initial_state = {
             "user_query": user_query,
             "search_results": [],
@@ -134,36 +175,10 @@ async def async_main() -> None:
         app = workflow.compile()
         result = await app.ainvoke(initial_state)
 
-        # Specify the project name to filter runs
-        project_name = "SmartResearch"
+        # Try to create visualization
+        await create_visualization(client, "SmartResearch")
 
-        # Retrieve runs associated with the specified project
-        runs = list(client.list_runs(project_name=project_name, is_root=True))
-
-        if not runs:
-            print(
-                f"No runs found for project '{project_name}'. Ensure that the project name is correct and that runs have been logged.")
-        else:
-            latest_run = runs[0]  # Get the latest run
-
-            # Retrieve child runs
-            child_runs = list(client.list_runs(parent_run=latest_run.id))
-
-            # Create a graph
-            dot = Digraph()
-
-            # Add the root node
-            dot.node(str(latest_run.id), latest_run.name)
-
-            # Add child nodes and edges
-            for child_run in child_runs:
-                dot.node(str(child_run.id), child_run.name)
-                dot.edge(str(latest_run.id), str(child_run.id))
-
-            # Render flowchart
-            dot.render("flowchart", format="png", view=True)
-
-        # Display results
+        # Display results regardless of visualization success
         print("\n=== Final Report ===\n")
         if result["relevant_texts"]:
             print("\n".join(result["relevant_texts"]))
