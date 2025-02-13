@@ -5,6 +5,7 @@ from web_search_agent import WebSearchAgent
 from langsmith import traceable
 import logging
 from typing import List, Dict, Optional
+import html2text
 
 # Configure logging
 logging.basicConfig(
@@ -64,7 +65,7 @@ async def call_openai_async(
 @traceable(name="perform_search")
 async def perform_search_async(query: str) -> List[str]:
     """
-    Searching with DuckDuckGo and returning list of URLs.
+    Searching with WebSearch agent and returning list of URLs.
     Uses AsyncDDGS for better performance and rate limit handling.
 
     Args:
@@ -117,9 +118,15 @@ async def fetch_webpage_text_async(session: aiohttp.ClientSession, url: str) -> 
             logger.warning(f"Skipping PDF file: {url}")
             return ""
 
+        h = html2text.HTML2Text()
+        h.ignore_links = True
+        h.ignore_images = True
+        h.ignore_emphasis = True
+
         async with session.get(url, timeout=20) as resp:
             if resp.status == 200:
-                return await resp.text()
+                content = await resp.text()  # get text from html
+                return h.handle(content)
             else:
                 logger.warning(f"Error loading {url}: {resp.status}")
                 return ""

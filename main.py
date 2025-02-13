@@ -3,6 +3,8 @@ import os
 import asyncio
 from langgraph.graph import StateGraph
 from langsmith import traceable
+from langsmith.client import Client
+from graphviz import Digraph
 from utils import perform_search_async, fetch_webpage_text_async, is_page_useful_async, extract_relevant_context_async
 from dotenv import load_dotenv
 import logging
@@ -112,6 +114,7 @@ async def async_main() -> None:
     try:
         # Load API keys
         keys = load_keys()
+        client = Client()
 
         # Get user input
         user_query = input("Enter research query: ").strip()
@@ -130,6 +133,35 @@ async def async_main() -> None:
         workflow = initialize_workflow()
         app = workflow.compile()
         result = await app.ainvoke(initial_state)
+
+        # Specify the project name to filter runs
+        project_name = "SmartResearch"
+
+        # Retrieve runs associated with the specified project
+        runs = list(client.list_runs(project_name=project_name, is_root=True))
+
+        if not runs:
+            print(
+                f"No runs found for project '{project_name}'. Ensure that the project name is correct and that runs have been logged.")
+        else:
+            latest_run = runs[0]  # Get the latest run
+
+            # Retrieve child runs
+            child_runs = list(client.list_runs(parent_run=latest_run.id))
+
+            # Create a graph
+            dot = Digraph()
+
+            # Add the root node
+            dot.node(str(latest_run.id), latest_run.name)
+
+            # Add child nodes and edges
+            for child_run in child_runs:
+                dot.node(str(child_run.id), child_run.name)
+                dot.edge(str(latest_run.id), str(child_run.id))
+
+            # Render flowchart
+            dot.render("flowchart", format="png", view=True)
 
         # Display results
         print("\n=== Final Report ===\n")
